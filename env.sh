@@ -18,8 +18,15 @@ PAGE_SIZE="${PAGE_SIZE:-64}"
 VALKEY_PORT=6399
 WORKER_PORTS=(30001 30002)
 KV_EVENT_PORTS=(5701 5602)
+KV_REPLAY_PORTS=(5711 5612)
+# Above a bridge restart, so a bridge outage is recovered by replay instead of
+# being mistaken for a worker death; below the time a provider tolerates
+# routing to a dead worker.
+HEARTBEAT_TTL_MS="${HEARTBEAT_TTL_MS:-30000}"
+LIVENESS_SWEEP_MS="${LIVENESS_SWEEP_MS:-5000}"
 INDEXER_MEMORY_PORT=50060
 INDEXER_VALKEY_PORTS=(50051 50052)
+INDEXER_EXTRA_PORT=50053
 ROUTER_PORT=8080
 
 worker_url() { echo "http://127.0.0.1:${WORKER_PORTS[$1]}"; }
@@ -36,20 +43,67 @@ wait_http() { # url, seconds
 
 pidfile() { echo "$RUN_DIR/$1.pid"; }
 
+# A pidfile alone is not proof: PIDs are recycled, and killing a recycled one
+# has already taken down an unrelated process here. Every pidfile is paired
+# with the command line we started, and a kill only happens on a match.
+running_pid() { # name -> prints the pid when it is still our process
+  local f cmd pid want
+  f=$(pidfile "$1")
+  [ -f "$f" ] || return 1
+  pid=$(cat "$f")
+  [ -n "$pid" ] && [ -r "/proc/$pid/cmdline" ] || return 1
+  # Without a recorded command line, anything under our build directory counts;
+  # both are exact enough that a recycled pid can never match.
+  cmd="$f.cmd"
+  want=$([ -f "$cmd" ] && cat "$cmd" || echo "$BIN/")
+  tr '\0' ' ' < "/proc/$pid/cmdline" | grep -qF "$want" || return 1
+  echo "$pid"
+}
+
 start_bg() { # name, cmd...
   local name=$1; shift
-  if [ -f "$(pidfile "$name")" ] && kill -0 "$(cat "$(pidfile "$name")")" 2>/dev/null; then
-    log "$name already running (pid $(cat "$(pidfile "$name")"))"; return 0
+  local pid
+  if pid=$(running_pid "$name"); then
+    log "$name already running (pid $pid)"; return 0
   fi
   "$@" >"$RUN_DIR/logs/$name.log" 2>&1 &
   echo $! >"$(pidfile "$name")"
+  echo "$1" >"$(pidfile "$name").cmd"
   log "started $name (pid $!)"
 }
 
 stop_bg() { # name
-  local f; f=$(pidfile "$1")
-  if [ -f "$f" ]; then
-    kill "$(cat "$f")" 2>/dev/null && log "stopped $1"
-    rm -f "$f"
+  local pid
+  if pid=$(running_pid "$1"); then
+    kill "$pid" 2>/dev/null && log "stopped $1 (pid $pid)"
+  fi
+  rm -f "$(pidfile "$1")" "$(pidfile "$1").cmd"
+}
+
+# Every binary we start lives under one build directory, so a full-path match is
+# both exact and immune to PID reuse. Used at scenario setup: a leftover router
+# or indexer from an earlier run would otherwise keep serving on the same port
+# and quietly invalidate the results.
+kill_all_ours() {
+  local killed=0 pid
+  for pid in $(pgrep -f "^$BIN/" 2>/dev/null); do
+    kill "$pid" 2>/dev/null && killed=$((killed + 1))
+  done
+  [ "$killed" -gt 0 ] && log "cleared $killed leftover process(es) from $BIN"
+  rm -f "$RUN_DIR"/*.pid "$RUN_DIR"/*.pid.cmd
+  sleep 1
+  pgrep -f "^$BIN/" >/dev/null 2>&1 && { log "processes survived SIGTERM; sending SIGKILL"; pkill -9 -f "^$BIN/"; sleep 1; }
+  return 0
+}
+
+# The pid in the pidfile must be the process holding the port, or a stale
+# listener is answering for us.
+assert_port_owner() { # name, port
+  local pid owner
+  pid=$(running_pid "$1") || { log "$1 is not running"; return 1; }
+  owner=$(ss -ltnpH "sport = :$2" 2>/dev/null | grep -o 'pid=[0-9]*' | head -1 | cut -d= -f2)
+  if [ "$owner" != "$pid" ]; then
+    log "port $2 is held by pid ${owner:-none}, not $1 (pid $pid)"
+    return 1
   fi
 }

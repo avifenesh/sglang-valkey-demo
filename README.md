@@ -55,43 +55,128 @@ the router is pointed at the first. `KV_INDEXER_BACKEND=valkey` and
 `KV_INDEXER_VALKEY_URL` are the only server-side differences from the in-memory
 run.
 
+## Stage B: Valkey as the placement and event plane
+
+Stage A (upstream PR #39785) made the placement index shared and restart-safe.
+Stage B (`pr-kv-indexer-event-plane`) adds the pieces the indexer's own README
+listed as missing for production high availability:
+
+- **Event log on Valkey Streams.** Bridges `XADD` each decoded event batch to
+  `<prefix>events` and indexers consume it through a consumer group under a
+  lease, so a bridge never needs an indexer to be up and an indexer never needs
+  a bridge to resend.
+- **Worker replay.** With SGLang's replay endpoint configured, a bridge asks the
+  worker for every batch after the last sequence it forwarded, on connect and on
+  a gap, and checkpoints that sequence in Valkey so a restart replays only the
+  gap. A sequence that goes backwards (worker restart) clears that worker first.
+- **Worker liveness.** Bridges heartbeat a TTL key while the worker's port
+  answers; indexers clear a worker whose heartbeat expired, through keyspace
+  expiry notifications with a sweep as backstop.
+
+Scripts: `indexer.sh <memory|valkey|stream>`, `scenario2.sh <mode> <event>`,
+`rebuild.sh`, `run_all.sh`.
+
 ## Results
 
-One RTX 5090, two Qwen3-1.7B workers with 40k-token KV pools each, closed loop
-with 6 clients, Indexer server killed at 90 s and restarted 1 s later (a rolling
-deploy). Per 10 s window; "blind" is the router's `no_cache_candidate` count for
-the whole run.
+One RTX 5090, two Qwen3-1.7B workers with 40k-token KV pools, 8 tenants with
+about 7.8k-token system prompts, 6 concurrent clients, closed loop. "Blind" is
+the router's `no_cache_candidate` count for the whole run; "index after" is how
+many placements the router's indexer could still answer for this workload's
+block set, probed live at that moment.
 
-| run | working set | mode | steady hit ratio | restart window hit ratio | TTFT p50 steady / window | TTFT p90 window | blind decisions |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| 30 tenants, 1.5k-token prompts | 47k tokens, above one pool | memory | 0.96 | 0.74 | 42 / 49 ms | 199 ms | 274 |
-| | | valkey | 0.96 | 0.93 | 43 / 45 ms | 58 ms | 43 |
-| 8 tenants, 7.8k-token prompts | 64k tokens, above one pool | memory | 0.99 | 0.70 | 56 / 492 ms | 1,056 ms | 161 |
-| | | valkey | 0.99 | 0.90 | 56 / 63 ms | 523 ms | 25 |
+### 1. Restarting the indexer the router points at
 
-In the long-prompt run the in-memory restart also cut throughput in the window
-to 39 requests from about 130; the Valkey-backed one served 93.
+| mode | index before | index 3 s after | blind decisions | worst window |
+| --- | --- | --- | --- | --- |
+| memory | 968 | **419** | **337** of 1,958 | 0.73 hit ratio, p90 980 ms |
+| stream (Valkey) | 968 | **1,210** (still growing) | **12** of 2,135 | 0.77 hit ratio, p90 1,053 ms |
 
-![30 tenants](results/run2-30tenants.png)
-![8 tenants, 8k prompts](results/run3-8tenants-8k.png)
+The in-memory index comes back empty and relearns only as blocks churn. The
+Valkey-backed one never lost anything. Both blink for the second the socket is
+down, because `sgl-router` takes a single `--kv-indexer-endpoint`: state
+durability cannot help while the endpoint the router holds is unreachable. That
+is a router limitation worth fixing separately (multiple endpoints with
+failover); with the current router, indexer HA means a stable address in front.
 
-What the numbers mean:
+### 2. Rotating the indexer fleet behind a stable address
 
-- The Valkey window still dips. During the second the server is down the router
-  gets no answer and falls back to load-based routing; that is the outage itself,
-  and the same for both backends. Two servers over one keyspace remove it
-  (`indexer.sh valkey start` runs two; `query_indexer.py` shows they answer byte
-  for byte alike), the router just needs to be pointed at the survivor.
-- After the restart the in-memory index is empty and only relearns a prefix when
-  a worker stores it again, so the router keeps routing blind for prefixes that
-  are already resident. Here the working set churns, so it relearns within a
-  window. A fleet with hot resident system prompts and little churn stays blind
-  far longer: a 12-tenant run whose working set fit both workers logged 893 blind
-  decisions over the remaining 90 s, masked only because both workers held every
-  prefix.
-- The index is small: 2,461 keys and 1.65 MB in Valkey for the 8-tenant fleet,
-  about a hundred bytes per block placement.
+Kill the indexer the router is *not* using, then start a new one:
 
-Reproduce: `./up.sh`, then `LOAD_ARGS="--tenants 8 --prompt-words 7500" DURATION=180
-EVENT_AT=90 OUTAGE=1 ./scenario.sh memory` and the same with `valkey`, then
-`report.py` on the two result directories.
+| mode | blind decisions | hit ratio | the new indexer, 5 s after start |
+| --- | --- | --- | --- |
+| stream (Valkey) | 10 of 1,992 | 0.99 flat | answers with all 968 placements |
+
+An added in-memory indexer would start empty and stay wrong until every prefix
+churned, which is why the same run has no memory-mode column.
+
+### 3. Bridge outage (20 s), steady workload: no difference, measured
+
+| mode | index before | index after | blind decisions |
+| --- | --- | --- | --- |
+| memory | 968 | 969 | 9 of 2,162 |
+| stream | 968 | 968 | 10 of 2,206 |
+
+Honest negative result. With a steady tenant set the worker publishes almost
+nothing new during the outage, so there is nothing to lose. Flushing the
+worker's cache mid-outage does not change it either: the same tenants re-store
+the same block hashes, so the index is accidentally right. The replay path is
+exercised in the same runs (`bridge-0.log`: `resuming from the checkpointed
+sequence seq=13356`, then `replayed buffered KV event batches ... replayed=123`)
+and is covered deterministically by `tests/bridge_replay.rs`. It pays off when
+the content changes during the outage, which this load generator does not do.
+
+### 4. Worker restart (about 70 s down)
+
+| mode | index right after the worker returned | blind decisions |
+| --- | --- | --- |
+| memory | 1,089 placements, **484 of them for the worker whose cache is empty** | 115 of 3,110 |
+| stream | 514, **all for the live worker**; the restarted one was cleared | 130 of 2,597 |
+
+Liveness removes the phantom prefixes. Two honest caveats from the same runs:
+TTFT during the hole is *worse* in stream mode (p50 1.0 to 3.3 s versus 0.5 to
+0.9 s) and it serves fewer requests, because on a two-worker rig clearing the
+dead worker concentrates every tenant on the survivor, whose 40k-token pool
+cannot hold 62k tokens of prompts; and after the worker returns, stream mode
+only routes to it again as it re-reports, so its capacity ramps up instead of
+being assumed. On a fleet where one worker is a small fraction of capacity, both
+behaviours are what you want; on this rig the phantom placements accidentally
+let memory mode use the returning worker sooner.
+
+### 5. Rebuilding the index from the stream
+
+With the load stopped and the world frozen (indexers first, then bridges):
+
+```
+1251 block hashes, stream length 12045, dbsize 2230
+wiping every key except the stream -> keys left: 1, placements: 0
+replaying the window into the empty keyspace as group rebuild-...
+rebuilt: dbsize 2225, placements 1251
+REBUILT INDEX IDENTICAL over 1251 block hashes (30601 bytes of placements)
+```
+
+Same per-worker split before and after (630 / 621), byte for byte. This is the
+"snapshot plus event replay" the indexer README asked for: the keyspace is the
+snapshot, the stream is the window.
+
+## Reproducing
+
+```sh
+./up.sh                                   # valkey + two workers
+./run_all.sh                              # every scenario, memory baseline vs stream
+./rebuild.sh                              # right after a stream-mode run
+./down.sh
+```
+
+Individual runs: `DURATION=180 EVENT_AT=60 ./scenario2.sh stream worker-restart`.
+Events: `indexer-restart`, `indexer-kill-add`, `bridge-outage`,
+`bridge-outage-churn`, `worker-restart`.
+
+## Notes for anyone repeating this
+
+- Two workers on one GPU need `--max-total-tokens` per worker; SGLang sizes the
+  pool from free memory, so the second worker otherwise gets whatever is left.
+- Never edit a running shell script: bash reads it incrementally and a mid-run
+  edit shifts the byte offsets, which silently corrupted two runs here.
+- Kill background processes by matching their full binary path, not by a stored
+  PID: a recycled PID took down a worker in one of these sessions and a leftover
+  router served a whole scenario from a stale index.

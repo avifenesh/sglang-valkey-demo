@@ -17,6 +17,7 @@ case $action in
       --kv-indexer-endpoint "http://127.0.0.1:$indexer_port" \
       --kv-indexer-query-timeout-ms 100
     wait_http "http://127.0.0.1:$ROUTER_PORT/readyz" 60 || { tail -20 "$RUN_DIR/logs/router.log"; exit 1; }
+    assert_port_owner router "$ROUTER_PORT" || { tail -20 "$RUN_DIR/logs/router.log"; exit 1; }
     log "router healthy on $ROUTER_PORT (indexer :$indexer_port)"
     ;;
   stop) stop_bg router ;;

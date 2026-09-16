@@ -8,6 +8,7 @@ and shows that every server returns byte-identical placements for them."""
 
 import argparse
 import importlib
+import json
 import os
 import subprocess
 import sys
@@ -51,12 +52,18 @@ def main():
     ap.add_argument("--hashes-from-valkey", type=int, default=6399, metavar="PORT")
     ap.add_argument("--prefix", default="{sgl-kv-indexer}:")
     ap.add_argument("--limit", type=int, default=64)
+    ap.add_argument("--hashes-file", help="one block hash per line instead of scanning Valkey")
+    ap.add_argument("--dump", help="write the normalized placements of the first endpoint as JSON")
     args = ap.parse_args()
 
     import grpc
 
     pb2, pb2_grpc = compile_proto(args.proto)
-    hashes = hashes_from_valkey(args.hashes_from_valkey, args.prefix, args.limit)
+    if args.hashes_file:
+        with open(args.hashes_file) as f:
+            hashes = [int(line) for line in f if line.strip()]
+    else:
+        hashes = hashes_from_valkey(args.hashes_from_valkey, args.prefix, args.limit)
     if not hashes:
         sys.exit("no block hashes in Valkey yet; run some load first")
     print(f"querying {len(hashes)} block hashes on {len(args.endpoints)} servers")
@@ -75,6 +82,13 @@ def main():
         print(f"  {endpoint}: {len(resp.matches)} workers, {held} placements")
 
     first = next(iter(answers.values()))
+    per_worker = {}
+    for worker_id, _, _, hashes in first:
+        per_worker[worker_id] = per_worker.get(worker_id, 0) + len(hashes)
+    print("per-worker placements: " + json.dumps(per_worker, sort_keys=True))
+    if args.dump:
+        with open(args.dump, "w") as f:
+            json.dump([list(p[:3]) + [list(p[3])] for p in first], f, indent=1, sort_keys=True)
     if all(v == first for v in answers.values()):
         print("all servers agree, byte for byte")
     else:
