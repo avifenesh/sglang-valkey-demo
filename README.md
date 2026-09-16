@@ -84,19 +84,31 @@ the router's `no_cache_candidate` count for the whole run; "index after" is how
 many placements the router's indexer could still answer for this workload's
 block set, probed live at that moment.
 
-### 1. Restarting the indexer the router points at
+### 1. Restarting the indexer, and a rolling restart of the whole fleet
 
-| mode | index before | index 3 s after | blind decisions | worst window |
+| setup | index before | index after | blind decisions | worst window |
 | --- | --- | --- | --- | --- |
-| memory | 968 | **419** | **337** of 1,958 | 0.73 hit ratio, p90 980 ms |
-| stream (Valkey) | 968 | **1,210** (still growing) | **12** of 2,135 | 0.77 hit ratio, p90 1,053 ms |
+| memory, one endpoint | 968 | **419** | **337** of 1,958 (17%) | 0.73 hit ratio, p90 980 ms |
+| Valkey, one endpoint | 968 | **1,210** (still growing) | 12 of 2,135 | 0.77 hit ratio, p90 1,053 ms |
+| Valkey, both endpoints | 968 | **968** | 12 of 2,052 | **none: 0.99 and p90 73 ms throughout** |
 
-The in-memory index comes back empty and relearns only as blocks churn. The
-Valkey-backed one never lost anything. Both blink for the second the socket is
-down, because `sgl-router` takes a single `--kv-indexer-endpoint`: state
-durability cannot help while the endpoint the router holds is unreachable. That
-is a router limitation worth fixing separately (multiple endpoints with
-failover); with the current router, indexer HA means a stable address in front.
+The in-memory index comes back empty and relearns only as blocks churn; the
+Valkey-backed one never loses anything. But durable state alone still leaves one
+window degraded, because a router holding a single `--kv-indexer-endpoint` has
+nowhere to ask while that socket is down.
+
+Giving the router every endpoint of the shared-state fleet closes it. The third
+row is a rolling restart of *both* indexers, one after the other, and no window
+moves at all; the router logs the two failovers and nothing else changes:
+
+```
+KV Indexer failover: queries now prefer another endpoint from=http://127.0.0.1:50051 to=http://127.0.0.1:50052
+KV Indexer failover: queries now prefer another endpoint from=http://127.0.0.1:50052 to=http://127.0.0.1:50051
+```
+
+That needed a router change (`--kv-indexer-endpoint` now takes a list, preferred
+first, failing over only while the current endpoint cannot answer), which is the
+third commit of the stage-B branch.
 
 ### 2. Rotating the indexer fleet behind a stable address
 
@@ -168,8 +180,9 @@ snapshot, the stream is the window.
 ```
 
 Individual runs: `DURATION=180 EVENT_AT=60 ./scenario2.sh stream worker-restart`.
-Events: `indexer-restart`, `indexer-kill-add`, `bridge-outage`,
-`bridge-outage-churn`, `worker-restart`.
+Events: `indexer-restart` (router on one endpoint), `indexer-restart-ha` (router
+on every endpoint), `indexer-kill-add`, `bridge-outage`, `bridge-outage-churn`,
+`worker-restart`.
 
 ## Notes for anyone repeating this
 

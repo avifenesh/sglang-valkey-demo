@@ -3,7 +3,10 @@
 #
 #   scenario2.sh <memory|valkey|stream> <event>
 #   events:
-#     indexer-restart   rolling restart of every indexer server (1 s each)
+#     indexer-restart   rolling restart of every indexer server (1 s each), with
+#                       the router pointed at one endpoint
+#     indexer-restart-ha   the same rolling restart, with the router given every
+#                       endpoint so it can fail over
 #     indexer-kill-add  kill the first indexer for good, start a third one
 #     bridge-outage     stop the bridge of worker 0 for OUTAGE seconds
 #     bridge-outage-churn  the same, but flush worker 0's cache while its bridge
@@ -18,7 +21,7 @@ set -euo pipefail
 source "$(dirname "$0")/env.sh"
 
 mode=${1:?memory|valkey|stream}
-event=${2:?indexer-restart|indexer-kill-add|bridge-outage|bridge-outage-churn|worker-restart}
+event=${2:?indexer-restart|indexer-restart-ha|indexer-kill-add|bridge-outage|bridge-outage-churn|worker-restart}
 duration=${DURATION:-180}
 event_at=${EVENT_AT:-60}
 outage=${OUTAGE:-20}
@@ -51,7 +54,11 @@ for i in 0 1; do curl -sf -X POST "$(worker_url $i)/flush_cache" >/dev/null || t
 "$DEMO_DIR/indexer.sh" "$mode" start
 sleep 2
 for port in "${ports[@]}"; do assert_port_owner "indexer-$port" "$port" || exit 1; done
-"$DEMO_DIR/router.sh" start "$router_port"
+case $event in
+  # The point of this one is the router holding every endpoint.
+  indexer-restart-ha) "$DEMO_DIR/router.sh" start "${ports[@]}" ;;
+  *) "$DEMO_DIR/router.sh" start "$router_port" ;;
+esac
 
 log "mode=$mode event=$event: load for ${duration}s, event at ${event_at}s"
 python3 "$DEMO_DIR/load.py" --router "http://127.0.0.1:$ROUTER_PORT" --model "$MODEL" \
@@ -61,7 +68,7 @@ load_pid=$!
 
 sleep "$event_at"
 case $event in
-  indexer-restart)
+  indexer-restart|indexer-restart-ha)
     index_probe "before the restart"
     for port in "${ports[@]}"; do
       log "restarting indexer :$port"
