@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# scenario2.sh — one operational event under load, for one indexer mode
+# event.sh — one operational event under load, for one indexer mode
 #
-#   scenario2.sh <memory|valkey|stream> <event>
+#   event.sh <memory|valkey|stream> <event>
 #   events:
 #     indexer-restart   rolling restart of every indexer server (1 s each), with
 #                       the router pointed at one endpoint

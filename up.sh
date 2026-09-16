@@ -16,7 +16,7 @@ for i in 0 1; do
   fi
   docker rm -f "$name" >/dev/null 2>&1 || true
   docker run -d --name "$name" --restart unless-stopped --gpus all --network host --ipc host --shm-size 8g \
-    -v "$HF_CACHE:/hf" -e HF_HUB_CACHE=/hf -e HF_HUB_OFFLINE=1 \
+    -v "$HF_CACHE:/hf" -e HF_HUB_CACHE=/hf -e "HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-1}" \
     "$IMAGE" python3 -m sglang.launch_server \
       --model-path "$MODEL" --host 0.0.0.0 --port "${WORKER_PORTS[$i]}" \
       --mem-fraction-static "$MEM_FRACTION" --max-total-tokens "$MAX_TOTAL_TOKENS" --page-size "$PAGE_SIZE" \

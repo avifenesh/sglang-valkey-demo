@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # query_indexer.py — ask several KV Indexer servers the same placement question and diff the answers
 """Usage: uv run --with grpcio --with grpcio-tools query_indexer.py --proto <kv_indexer.proto> \
-          --hashes-from-valkey 6399 --endpoints 127.0.0.1:50051 127.0.0.1:50052
+          --hashes-from-valkey <valkey-port> --endpoints 127.0.0.1:50051 127.0.0.1:50052
 
 Compiles the proto at runtime, pulls block hashes out of the Valkey keyspace,
 and shows that every server returns byte-identical placements for them."""
@@ -49,7 +49,12 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--proto", required=True)
     ap.add_argument("--endpoints", nargs="+", required=True)
-    ap.add_argument("--hashes-from-valkey", type=int, default=6399, metavar="PORT")
+    ap.add_argument(
+        "--hashes-from-valkey",
+        type=int,
+        default=int(os.environ.get("VALKEY_PORT", "6399")),
+        metavar="PORT",
+    )
     ap.add_argument("--prefix", default="{sgl-kv-indexer}:")
     ap.add_argument("--limit", type=int, default=64)
     ap.add_argument("--hashes-file", help="one block hash per line instead of scanning Valkey")

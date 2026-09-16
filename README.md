@@ -36,10 +36,23 @@ load.py  ->  sgl-router (cache_aware, prefix provider = indexer)  ->  2x SGLang 
 
 ## Run
 
-Needs: docker with the NVIDIA runtime, `valkey-server` on PATH, the SGLang
-router workspace built in release mode (`cargo build --release -p sgl-router
--p sgl-kv-indexer` in `experimental/sgl-router`), and the model in the local
-HF cache.
+Needs docker with the NVIDIA runtime, `valkey-server` on `PATH`, `uv` (for the
+gRPC probe), and one GPU with room for two small workers.
+
+Point it at your own checkout and cache, then build the binaries:
+
+```sh
+export SGLANG_DIR=~/src/sglang          # or SGLANG_ROUTER_DIR directly
+export HF_CACHE=~/.cache/huggingface/hub # must already hold MODEL
+(cd "$SGLANG_DIR/experimental/sgl-router" && cargo build --release -p sgl-router -p sgl-kv-indexer)
+```
+
+`env.sh` holds the rest and every value is overridable: `MODEL`,
+`MAX_TOTAL_TOKENS`, `MEM_FRACTION`, `VALKEY_PORT`, `WORKER_PORTS`,
+`KV_EVENT_PORTS`, `KV_REPLAY_PORTS`, `HEARTBEAT_TTL_MS`. The workers run with
+`HF_HUB_OFFLINE=1`, so pull the model first. The stage-B scenarios need the
+`pr-kv-indexer-event-plane` branch (upstream PRs sgl-project/sglang#39785 and
+#39822); the stage-A ones only need #39785.
 
 ```sh
 ./up.sh                      # valkey + two workers, waits for health
@@ -73,8 +86,9 @@ listed as missing for production high availability:
   answers; indexers clear a worker whose heartbeat expired, through keyspace
   expiry notifications with a sweep as backstop.
 
-Scripts: `indexer.sh <memory|valkey|stream>`, `scenario2.sh <mode> <event>`,
-`rebuild.sh`, `run_all.sh`.
+Scripts: `indexer.sh <memory|valkey|stream>`, `event.sh <mode> <event>`,
+`rebuild.sh`, `run_all.sh`. (`scenario.sh` is the older stage-A
+restart-under-load script, kept for the results above it.)
 
 ## Results
 
@@ -179,7 +193,7 @@ snapshot, the stream is the window.
 ./down.sh
 ```
 
-Individual runs: `DURATION=180 EVENT_AT=60 ./scenario2.sh stream worker-restart`.
+Individual runs: `DURATION=180 EVENT_AT=60 ./event.sh stream worker-restart`.
 Events: `indexer-restart` (router on one endpoint), `indexer-restart-ha` (router
 on every endpoint), `indexer-kill-add`, `bridge-outage`, `bridge-outage-churn`,
 `worker-restart`.

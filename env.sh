@@ -1,13 +1,18 @@
 # Shared settings for the SGLang + Valkey KV Indexer demo. Source, do not run.
 
 DEMO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SGLANG_ROUTER_DIR="${SGLANG_ROUTER_DIR:-$HOME/projects/sglang/wt-kv-valkey/experimental/sgl-router}"
+# Checkout of SGLang holding the router workspace, built in release mode. Set
+# SGLANG_ROUTER_DIR to your own checkout, or SGLANG_DIR to the repo root.
+SGLANG_DIR="${SGLANG_DIR:-$HOME/projects/sglang}"
+SGLANG_ROUTER_DIR="${SGLANG_ROUTER_DIR:-$SGLANG_DIR/experimental/sgl-router}"
 BIN="${BIN:-$SGLANG_ROUTER_DIR/target/release}"
 RUN_DIR="${RUN_DIR:-$HOME/.cache/sglang-valkey-demo}"
 mkdir -p "$RUN_DIR/logs" "$RUN_DIR/results"
 
 IMAGE="${IMAGE:-lmsysorg/sglang:dev-cu13}"
-HF_CACHE="${HF_CACHE:-/data/ai-ml/hf-models}"
+# Hugging Face cache mounted into the worker containers. The model must already
+# be there: the containers run offline (see up.sh).
+HF_CACHE="${HF_CACHE:-${HF_HUB_CACHE:-$HOME/.cache/huggingface/hub}}"
 MODEL="${MODEL:-Qwen/Qwen3-1.7B}"
 TOKENIZER="${TOKENIZER:-$(ls -d "$HF_CACHE"/models--Qwen--Qwen3-1.7B/snapshots/*/ | head -1)tokenizer.json}"
 MEM_FRACTION="${MEM_FRACTION:-0.85}"
@@ -15,10 +20,12 @@ MEM_FRACTION="${MEM_FRACTION:-0.85}"
 MAX_TOTAL_TOKENS="${MAX_TOTAL_TOKENS:-40000}"
 PAGE_SIZE="${PAGE_SIZE:-64}"
 
-VALKEY_PORT=6399
-WORKER_PORTS=(30001 30002)
-KV_EVENT_PORTS=(5701 5602)
-KV_REPLAY_PORTS=(5711 5612)
+# Ports. Every default here is offset from the usual ones so the demo can run
+# beside whatever else is on the box; override any of them if they collide.
+VALKEY_PORT="${VALKEY_PORT:-6399}"
+WORKER_PORTS=(${WORKER_PORTS:-30001 30002})
+KV_EVENT_PORTS=(${KV_EVENT_PORTS:-5701 5702})
+KV_REPLAY_PORTS=(${KV_REPLAY_PORTS:-5711 5712})
 # Above a bridge restart, so a bridge outage is recovered by replay instead of
 # being mistaken for a worker death; below the time a provider tolerates
 # routing to a dead worker.
