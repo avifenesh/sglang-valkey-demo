@@ -97,7 +97,12 @@ kill_all_ours() {
     kill "$pid" 2>/dev/null && killed=$((killed + 1))
   done
   [ "$killed" -gt 0 ] && log "cleared $killed leftover process(es) from $BIN"
-  rm -f "$RUN_DIR"/*.pid "$RUN_DIR"/*.pid.cmd
+  # Valkey is the one process not under $BIN, so down.sh still needs its pidfile
+  # to stop the server this demo started.
+  for pidfile in "$RUN_DIR"/*.pid "$RUN_DIR"/*.pid.cmd; do
+    case "$pidfile" in *valkey.pid | *valkey.pid.cmd) continue ;; esac
+    rm -f "$pidfile"
+  done
   sleep 1
   pgrep -f "^$BIN/" >/dev/null 2>&1 && { log "processes survived SIGTERM; sending SIGKILL"; pkill -9 -f "^$BIN/"; sleep 1; }
   return 0

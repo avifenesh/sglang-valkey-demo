@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # run_all.sh — every scenario, memory baseline against the Valkey event plane
 #
-# About half an hour on two workers sharing one GPU. Each run starts from a
-# clean slate; a memory-mode run flushes Valkey, so the rebuild proof comes
-# straight after a stream-mode run.
+# About half an hour on two workers sharing one GPU. Each run starts from a clean
+# slate. Order matters twice: a stream run goes first because it is what writes
+# the block-hash file the memory-mode probes read, and the rebuild proof needs a
+# stream run immediately before it, since a memory run flushes Valkey.
 set -uo pipefail
 source "$(dirname "$0")/env.sh"
 export LOAD_ARGS="${LOAD_ARGS:---tenants 8 --prompt-words 7500 --concurrency 6}"
@@ -14,8 +15,8 @@ run() { # mode event duration event_at
     && log "done $1 $2 ($(tail -1 "$R/$1-$2/load.log" | cut -c1-58))" || log "FAILED $1 $2"
 }
 
-run memory indexer-restart 180 60
 run stream indexer-restart 180 60
+run memory indexer-restart 180 60
 run stream indexer-restart-ha 180 60
 run stream indexer-kill-add 180 60
 run memory bridge-outage-churn 180 60
