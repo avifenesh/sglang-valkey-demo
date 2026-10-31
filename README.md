@@ -51,8 +51,10 @@ export HF_CACHE=~/.cache/huggingface/hub # must already hold MODEL
 `MAX_TOTAL_TOKENS`, `MEM_FRACTION`, `VALKEY_PORT`, `WORKER_PORTS`,
 `KV_EVENT_PORTS`, `KV_REPLAY_PORTS`, `HEARTBEAT_TTL_MS`. The workers run with
 `HF_HUB_OFFLINE=1`, so pull the model first. The stage-B scenarios need the
-`pr-kv-indexer-event-plane` branch (upstream PRs sgl-project/sglang#39785 and
-#39822); the stage-A ones only need #39785.
+`pr-kv-indexer-event-plane` branch of
+[avifenesh/sglang](https://github.com/avifenesh/sglang/tree/pr-kv-indexer-event-plane);
+the stage-A ones only need `pr-kv-indexer-valkey`. Both were proposed upstream as
+sgl-project/sglang#39785 and #39822, which were closed without merging.
 
 ```sh
 ./up.sh                      # valkey + two workers, waits for health
@@ -66,7 +68,7 @@ python3 report.py ~/.cache/sglang-valkey-demo/results/memory ~/.cache/sglang-val
 `indexer.sh valkey start` brings up two Indexer servers over the same keyspace;
 the router is pointed at the first. `KV_INDEXER_BACKEND=valkey` and
 `KV_INDEXER_VALKEY_URL` are the only server-side differences from the in-memory
-run.
+run, plus `KV_INDEXER_LIVENESS=0`, which keeps the stage-B liveness watcher off.
 
 ## Stage B: Valkey as the placement and event plane
 
@@ -121,8 +123,8 @@ KV Indexer failover: queries now prefer another endpoint from=http://127.0.0.1:5
 ```
 
 That needed a router change (`--kv-indexer-endpoint` now takes a list, preferred
-first, failing over only while the current endpoint cannot answer), which is the
-third commit of the stage-B branch.
+first, failing over only while the current endpoint cannot answer), which is part
+of the stage-B commit.
 
 ### 2. Rotating the indexer fleet behind a stable address
 
